@@ -1,7 +1,7 @@
 import axios, { AxiosError } from 'axios';
 import { Match, Team, HistoricalMatch } from './types';
 
-const API_KEY = '1484398d441847449fdbcc41a0db07dc';
+const API_KEY = '5e8d69f2f7ac48f3a8230bce3c865b1e';
 const BASE_URL = 'https://cors-proxy.fringe.zone/https://api.football-data.org/v4';
 
 const api = axios.create({
