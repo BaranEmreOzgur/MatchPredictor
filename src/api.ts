@@ -1,37 +1,76 @@
 import axios, { AxiosError } from 'axios';
 import { Match, Team, HistoricalMatch } from './types';
+import { mockMatches, mockHistoricalMatches } from './mockData';
 
-const API_KEY = '6b4628520a464ba7bd652f04cf7018f7';
+// Multiple API keys for fallback
+const API_KEYS = [
+  '6b4628520a464ba7bd652f04cf7018f7',
+  '5e8d69f2f7ac48f3a8230bce3c865b1e',
+  'c5ea5b9725424b8e9f9e6c963c7889a3'
+];
+
 const BASE_URL = 'https://cors-proxy.fringe.zone/https://api.football-data.org/v4';
 
-const api = axios.create({
+let currentKeyIndex = 0;
+let useMockData = false;
+
+const createApiInstance = (apiKey: string) => axios.create({
   baseURL: BASE_URL,
   headers: {
-    'X-Auth-Token': API_KEY
+    'X-Auth-Token': apiKey
   },
-  timeout: 30000 // 30 second timeout
+  timeout: 30000
 });
 
+let api = createApiInstance(API_KEYS[currentKeyIndex]);
+
+const rotateApiKey = () => {
+  currentKeyIndex = (currentKeyIndex + 1) % API_KEYS.length;
+  api = createApiInstance(API_KEYS[currentKeyIndex]);
+  console.log('Rotating to next API key...');
+};
+
 const fetchWithRetry = async (request: () => Promise<any>, maxRetries = 3) => {
-  for (let i = 0; i < maxRetries; i++) {
+  let lastError: Error | null = null;
+  
+  for (let i = 0; i < maxRetries * API_KEYS.length; i++) {
     try {
       return await request();
     } catch (error) {
-      if (i === maxRetries - 1) throw error;
-      // Exponential backoff
-      await new Promise(resolve => setTimeout(resolve, Math.min(1000 * Math.pow(2, i), 8000)));
+      lastError = error as Error;
+      
+      if (error instanceof AxiosError) {
+        if (error.response?.status === 429 || error.response?.status === 403) {
+          console.log('Rate limit or auth error, rotating API key...');
+          rotateApiKey();
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        } else if (error.code === 'ECONNABORTED' || error.message.includes('Network Error')) {
+          await new Promise(resolve => setTimeout(resolve, Math.min(3000 * Math.pow(2, i % maxRetries), 10000)));
+        } else {
+          await new Promise(resolve => setTimeout(resolve, Math.min(1000 * Math.pow(2, i % maxRetries), 8000)));
+        }
+      }
+      
+      if (i === maxRetries * API_KEYS.length - 1) {
+        useMockData = true;
+        console.log('Switching to mock data after all retries failed');
+        throw lastError;
+      }
     }
   }
 };
 
-// Store historical matches in a plain object instead of using Symbols
-const historicalMatchesStore = {
-  matches: [] as HistoricalMatch[]
+const historicalMatchesStore: { matches: HistoricalMatch[] } = {
+  matches: []
 };
 
 const fetchHistoricalMatches = async () => {
   try {
-    // Fetch matches for multiple seasons (2023-2025)
+    if (useMockData) {
+      historicalMatchesStore.matches = mockHistoricalMatches;
+      return;
+    }
+
     const seasons = [2023, 2024];
     const matchPromises = seasons.map(season => 
       fetchWithRetry(() => api.get(`/competitions/PL/matches?season=${season}&status=FINISHED`))
@@ -50,17 +89,14 @@ const fetchHistoricalMatches = async () => {
       season: match.season.id
     }));
   } catch (error) {
-    if (error instanceof Error) {
-      console.error('Failed to fetch historical matches:', error.message);
-    }
-    // Initialize with empty array on error
-    historicalMatchesStore.matches = [];
+    console.error('Failed to fetch historical matches:', error instanceof Error ? error.message : 'Unknown error');
+    historicalMatchesStore.matches = mockHistoricalMatches;
   }
 };
 
-// Initialize historical matches
-fetchHistoricalMatches().catch(() => {
-  historicalMatchesStore.matches = [];
+fetchHistoricalMatches().catch(error => {
+  console.error('Failed to initialize historical matches:', error instanceof Error ? error.message : 'Unknown error');
+  historicalMatchesStore.matches = mockHistoricalMatches;
 });
 
 export const getHistoricalMatchups = (homeTeamId: number, awayTeamId: number) => {
@@ -72,12 +108,15 @@ export const getHistoricalMatchups = (homeTeamId: number, awayTeamId: number) =>
 
 export const getMatches = async (): Promise<Match[]> => {
   try {
-    // Calculate date range for next 10 days
+    if (useMockData) {
+      console.log('Using mock match data');
+      return mockMatches;
+    }
+
     const today = new Date();
     const tenDaysFromNow = new Date();
     tenDaysFromNow.setDate(today.getDate() + 10);
 
-    // Format dates for API
     const dateFrom = today.toISOString().split('T')[0];
     const dateTo = tenDaysFromNow.toISOString().split('T')[0];
 
@@ -112,11 +151,15 @@ export const getMatches = async (): Promise<Match[]> => {
       status: match.status
     }));
   } catch (error) {
+    console.log('API error, falling back to mock data');
     if (error instanceof AxiosError) {
       console.error('API Error:', error.message);
+      if (error.response?.status === 429) {
+        console.error('Rate limit exceeded. Using mock data.');
+      }
     } else if (error instanceof Error) {
       console.error('Unexpected error:', error.message);
     }
-    return [];
+    return mockMatches;
   }
 };
